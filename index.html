@@ -1,0 +1,301 @@
+<!DOCTYPE html> 
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Global Voice Chat</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: #111;
+      font-family: Arial, sans-serif;
+      color: white;
+    }
+    h1 {
+      margin: 10px;
+    }
+    #videoGrid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 10px;
+      width: 100%;
+      max-width: 1200px;
+      padding: 10px;
+    }
+    .tile {
+      background: #1e1f22;
+      border-radius: 8px;
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+    }
+    .tile video {
+      width: 640px;
+      aspect-ratio: 16/9;
+      object-fit: contain;
+      background: black;
+      border-radius: 10px;
+    }
+    .tile audio {
+      display: none;
+    }
+    .nameTag {
+      position: absolute;
+      bottom: 5px;
+      left: 5px;
+      background: rgba(0,0,0,0.6);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9rem;
+    }
+    #controlBar {
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 15px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px 20px;
+      border-radius: 12px;
+    }
+    button {
+      padding: 8px 15px;
+      border: none;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button:hover {
+      opacity: 0.8;
+    }
+    #screenPreview {
+      width: 640px;
+      aspect-ratio: 16/9;
+      border: 2px solid #444;
+      border-radius: 10px;
+      margin-top: 10px;
+      display: none;
+      background: black;
+      object-fit: contain;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔊 Global Voice Chat</h1>
+  <button id="joinBtn">Join Voice</button>
+
+  <div id="videoGrid"></div>
+
+  <!-- Screen Preview -->
+  <video id="screenPreview" autoplay playsinline></video>
+
+  <div id="controlBar" style="display:none;">
+    <button id="muteBtn">🎤 Mute</button>
+    <button id="speakerBtn">🔈 Speaker Off</button>
+    <button id="screenBtn">🖥️ Share Screen</button>
+    <button id="leaveBtn" style="background:red;color:white;">❌ Leave</button>
+  </div>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+  <script>
+    // Firebase Config
+    const firebaseConfig = {
+      apiKey: "AIzaSyBuT-JTwm3pPJ2RdKEo41W0HcY2ub96r50",
+      authDomain: "black-fire-mod.firebaseapp.com",
+      databaseURL: "https://black-fire-mod-default-rtdb.firebaseio.com",
+      projectId: "black-fire-mod",
+      storageBucket: "black-fire-mod.firebasestorage.app",
+      messagingSenderId: "517236850280",
+      appId: "1:517236850280:web:378f5fc54b9f0838e105dd"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const joinBtn = document.getElementById("joinBtn");
+    const muteBtn = document.getElementById("muteBtn");
+    const speakerBtn = document.getElementById("speakerBtn");
+    const leaveBtn = document.getElementById("leaveBtn");
+    const screenBtn = document.getElementById("screenBtn");
+    const controlBar = document.getElementById("controlBar");
+    const grid = document.getElementById("videoGrid");
+    const screenPreview = document.getElementById("screenPreview");
+
+    let localStream, screenStream;
+    let peers = {};
+    const roomId = "globalRoom";
+    const servers = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    const myId = Math.random().toString(36).substring(2, 9);
+    let isMuted = false;
+    let isSpeakerOff = false;
+
+    function addPeerTile(peerId, stream, isVideo = false) {
+      if (document.getElementById("tile-" + peerId)) return;
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      tile.id = "tile-" + peerId;
+
+      let mediaEl;
+      if (isVideo) {
+        mediaEl = document.createElement("video");
+        mediaEl.srcObject = stream;
+        mediaEl.autoplay = true;
+        mediaEl.playsInline = true;
+      } else {
+        mediaEl = document.createElement("audio");
+        mediaEl.srcObject = stream;
+        mediaEl.autoplay = true;
+        mediaEl.muted = isSpeakerOff;
+      }
+
+      const name = document.createElement("div");
+      name.className = "nameTag";
+      name.textContent = peerId;
+
+      tile.appendChild(mediaEl);
+      tile.appendChild(name);
+      grid.appendChild(tile);
+    }
+
+    function removePeerTile(peerId) {
+      const tile = document.getElementById("tile-" + peerId);
+      if (tile) tile.remove();
+    }
+
+    async function initCall() {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      addPeerTile(myId, localStream, false);
+      controlBar.style.display = "flex";
+      joinBtn.style.display = "none";
+
+      const roomRef = db.ref("rooms/" + roomId);
+      const myRef = roomRef.child(myId);
+      window.addEventListener("beforeunload", () => myRef.remove());
+
+      roomRef.on("child_added", (snap) => {
+        const peerId = snap.key;
+        if (peerId === myId) return;
+
+        snap.ref.on("child_added", async (msgSnap) => {
+          const data = msgSnap.val();
+          if (!data) return;
+
+          let pc = peers[peerId];
+          if (!pc) pc = createPeer(peerId, myRef);
+
+          if (data.type === "offer" && data.to === myId) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            myRef.push({ type: "answer", to: peerId, answer });
+          }
+
+          if (data.type === "answer" && data.to === myId) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+          }
+
+          if (data.type === "ice" && data.to === myId) {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          }
+        });
+      });
+    }
+
+    function createPeer(peerId, myRef) {
+      const pc = new RTCPeerConnection(servers);
+      peers[peerId] = pc;
+
+      localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+      pc.ontrack = (event) => {
+        addPeerTile(peerId, event.streams[0], event.track.kind === "video");
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          myRef.push({ type: "ice", to: peerId, candidate: event.candidate });
+        }
+      };
+
+      pc.createOffer().then((offer) => {
+        pc.setLocalDescription(offer);
+        myRef.push({ type: "offer", to: peerId, offer });
+      });
+
+      return pc;
+    }
+
+    // Buttons
+    joinBtn.onclick = () => initCall();
+
+    muteBtn.onclick = () => {
+      isMuted = !isMuted;
+      localStream.getAudioTracks()[0].enabled = !isMuted;
+      muteBtn.textContent = isMuted ? "🎤 Unmute" : "🎤 Mute";
+    };
+
+    speakerBtn.onclick = () => {
+      isSpeakerOff = !isSpeakerOff;
+      document.querySelectorAll("audio").forEach((a) => (a.muted = isSpeakerOff));
+      speakerBtn.textContent = isSpeakerOff ? "🔇 Speaker On" : "🔈 Speaker Off";
+    };
+
+    leaveBtn.onclick = () => {
+      Object.values(peers).forEach((pc) => pc.close());
+      peers = {};
+      if (localStream) localStream.getTracks().forEach((t) => t.stop());
+      if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
+      grid.innerHTML = "";
+      joinBtn.style.display = "block";
+      controlBar.style.display = "none";
+      screenPreview.style.display = "none";
+    };
+
+    // ✅ Updated Screen Share (Mobile + Desktop)
+    screenBtn.onclick = async () => {
+      try {
+        if (!screenStream) {
+          if (/Mobi|Android/i.test(navigator.userAgent)) {
+            // 📱 Mobile fallback
+            alert("Mobile में proper screen share support नहीं है, Camera share होगा!");
+            screenStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          } else {
+            // 💻 Desktop
+            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+          }
+
+          screenPreview.srcObject = screenStream;
+          screenPreview.style.display = "block";
+
+          Object.values(peers).forEach((pc) => {
+            const sender = pc.getSenders().find((s) => s.track.kind === "video");
+            if (sender) sender.replaceTrack(screenStream.getVideoTracks()[0]);
+          });
+
+          screenBtn.textContent = "🛑 Stop Screen";
+        } else {
+          // ❌ Stop
+          screenStream.getTracks().forEach((t) => t.stop());
+          screenStream = null;
+          screenPreview.srcObject = null;
+          screenPreview.style.display = "none";
+          screenBtn.textContent = "🖥️ Share Screen";
+        }
+      } catch (err) {
+        console.error("Screen share error:", err);
+        alert("Screen share failed: " + err.message);
+      }
+    };
+  </script>
+</body>
+</html>
